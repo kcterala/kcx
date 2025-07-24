@@ -13,7 +13,7 @@ import (
 var rootCmd = &cobra.Command{
 	Use:   "kcx",
 	Short: "my utility tools",
-	Long: `Some set of utility tools`,
+	Long:  `Some set of utility tools`,
 }
 
 // Execute adds all child commands to the root command and sets flags appropriately.
@@ -28,5 +28,3 @@ func Execute() {
 func init() {
 	rootCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
 }
-
-

@@ -21,14 +21,14 @@ var (
 var ipCmd = &cobra.Command{
 	Use:   "ip",
 	Short: "shows ip and copies to the clipboard",
-	Long: `Same as short`,
+	Long:  `Same as short`,
 	Run: func(cmd *cobra.Command, args []string) {
 		printAndCopyIpAddress()
 	},
 }
 
 func printAndCopyIpAddress() {
-	ipAddress, err  := getIpAddress()
+	ipAddress, err := getIpAddress()
 	if err != nil {
 		fmt.Println("error fetching ip address.")
 		return
@@ -58,8 +58,8 @@ func getIpAddress() (string, error) {
 	}
 
 	defer resp.Body.Close()
-	
-	body, err  := io.ReadAll(resp.Body)
+
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return "", err
 	}
