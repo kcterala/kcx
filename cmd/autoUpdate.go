@@ -58,10 +58,11 @@ set -e  # Exit on any error
 
 REPO_PATH="%s"
 
-# Function to check internet connectivity
-check_internet() {
-    if ! ping -c 1 8.8.8.8 >/dev/null 2>&1; then
-        echo "No internet connection available. Skipping sync at $(date)"
+UPSTREAM_URL=$(git -C "$REPO_PATH" remote get-url %s)
+
+check_git_connectivity() {
+    if ! git -C "$REPO_PATH" ls-remote "$UPSTREAM_URL" >/dev/null 2>&1; then
+        echo "Unable to reach remote $UPSTREAM_URL. Skipping sync at $(date)"
         exit 0
     fi
 }
@@ -82,7 +83,7 @@ can_switch_branch() {
 }
 
 # Check internet connectivity first
-check_internet
+check_git_connectivity
 
 # Store current branch
 CURRENT=$(git -C "$REPO_PATH" rev-parse --abbrev-ref HEAD)
@@ -145,7 +146,7 @@ else
 fi
 
 echo "Git sync completed successfully at $(date)"
-`, path, branch, branch, upstream, upstream, branch, upstream, branch, branch, branch, branch, upstream, upstream, branch)
+`, path, upstream, branch, branch, upstream, upstream, branch, upstream, branch, branch, branch, branch, upstream, upstream, branch)
 
 	// Create script file path
 	scriptPath := "/tmp/git-sync-" + strings.ReplaceAll(filepath.Base(path), " ", "-") + ".sh"
