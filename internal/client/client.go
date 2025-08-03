@@ -2,6 +2,8 @@ package client
 
 import (
 	"bytes"
+	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -22,6 +24,9 @@ type TunnelClient struct {
     conn       *websocket.Conn
     httpClient *http.Client
     logger     *log.Logger
+    writeQueue chan TunnelMessage // Channel for queuing writes
+    ctx        context.Context
+    cancel     context.CancelFunc
 }
 
 type TunnelMessage struct {
@@ -34,7 +39,7 @@ type TunnelMessage struct {
     Method     string            `json:"method,omitempty"`
     Path       string            `json:"path,omitempty"`
     Headers    map[string]string `json:"headers,omitempty"`
-    Body       []byte            `json:"body,omitempty"`
+    Body       string            `json:"body,omitempty"` // base64 encoded
     StatusCode int               `json:"statusCode,omitempty"`
 }
 
@@ -44,12 +49,17 @@ func NewTunnelClient(config *Config) *TunnelClient {
         logger.SetOutput(io.Discard)
     }
 
+    ctx, cancel := context.WithCancel(context.Background())
+
     return &TunnelClient{
         config: config,
         httpClient: &http.Client{
             Timeout: 30 * time.Second,
         },
-        logger: logger,
+        logger:     logger,
+        writeQueue: make(chan TunnelMessage, 1000), // Buffer for 1000 messages
+        ctx:        ctx,
+        cancel:     cancel,
     }
 }
 
@@ -69,6 +79,9 @@ func (tc *TunnelClient) Start() error {
         return fmt.Errorf("failed to connect to server: %w", err)
     }
     defer tc.conn.Close()
+
+    // Start write worker
+    go tc.writeWorker()
 
     // Register tunnel
     if err := tc.register(); err != nil {
@@ -92,13 +105,66 @@ func (tc *TunnelClient) connect() error {
 
     tc.logger.Printf("Connecting to %s", u.String())
     
-    conn, _, err := websocket.DefaultDialer.Dial(u.String(), nil)
+    // Configure dialer with larger message size limits
+    dialer := websocket.DefaultDialer
+    dialer.ReadBufferSize = 64 * 1024 * 1024  // 64MB
+    dialer.WriteBufferSize = 64 * 1024 * 1024 // 64MB
+    
+    conn, _, err := dialer.Dial(u.String(), nil)
     if err != nil {
         return err
     }
 
+    // Set read and write limits on the connection
+    conn.SetReadLimit(64 * 1024 * 1024) // 64MB limit for incoming messages
+    
     tc.conn = conn
     tc.logger.Printf("Connected to tunnel server")
+    return nil
+}
+
+// writeWorker handles all WebSocket writes in a single goroutine to prevent concurrent access
+func (tc *TunnelClient) writeWorker() {
+    tc.logger.Printf("Starting write worker")
+    defer tc.logger.Printf("Write worker stopped")
+    
+    for {
+        select {
+        case msg := <-tc.writeQueue:
+            if err := tc.writeMessage(msg); err != nil {
+                tc.logger.Printf("Failed to write message: %v", err)
+                // Consider implementing retry logic or error handling here
+            }
+        case <-tc.ctx.Done():
+            tc.logger.Printf("Write worker context cancelled")
+            return
+        }
+    }
+}
+
+func (tc *TunnelClient) writeMessage(msg TunnelMessage) error {
+    data, err := json.Marshal(msg)
+    if err != nil {
+        return fmt.Errorf("failed to marshal message: %w", err)
+    }
+
+    tc.logger.Printf("Writing WebSocket message of size: %d bytes, type: %s", len(data), msg.Type)
+    
+    // Log large message warning
+    if len(data) > 10*1024*1024 { // 10MB
+        tc.logger.Printf("WARNING: Writing very large message (%d bytes)", len(data))
+    }
+
+    // Set write deadline to prevent hanging
+    tc.conn.SetWriteDeadline(time.Now().Add(30 * time.Second))
+    defer tc.conn.SetWriteDeadline(time.Time{}) // Remove deadline
+    
+    err = tc.conn.WriteMessage(websocket.TextMessage, data)
+    if err != nil {
+        return fmt.Errorf("failed to write WebSocket message: %w", err)
+    }
+
+    tc.logger.Printf("Message written successfully")
     return nil
 }
 
@@ -113,14 +179,20 @@ func (tc *TunnelClient) register() error {
         return fmt.Errorf("failed to send register message: %w", err)
     }
 
-    // Wait for registration response
+    // Wait for registration response with timeout
+    tc.conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+    defer tc.conn.SetReadDeadline(time.Time{}) // Remove deadline
+    
     _, message, err := tc.conn.ReadMessage()
     if err != nil {
         return fmt.Errorf("failed to read registration response: %w", err)
     }
 
+    tc.logger.Printf("Registration response size: %d bytes", len(message))
+
     var response TunnelMessage
     if err := json.Unmarshal(message, &response); err != nil {
+        tc.logger.Printf("Failed to parse registration response. Raw message: %s", string(message))
         return fmt.Errorf("failed to parse registration response: %w", err)
     }
 
@@ -141,28 +213,55 @@ func (tc *TunnelClient) register() error {
 }
 
 func (tc *TunnelClient) handleMessages() {
+    tc.logger.Printf("Starting message handler")
+    defer tc.logger.Printf("Message handler stopped")
+    
     for {
-        _, message, err := tc.conn.ReadMessage()
-        if err != nil {
-            if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-                tc.logger.Printf("WebSocket error: %v", err)
-            }
-            break
-        }
-
-        var tunnelMsg TunnelMessage
-        if err := json.Unmarshal(message, &tunnelMsg); err != nil {
-            tc.logger.Printf("Failed to unmarshal message: %v", err)
-            continue
-        }
-
-        tc.logger.Printf("Received message type: %s", tunnelMsg.Type)
-
-        switch tunnelMsg.Type {
-        case "request":
-            go tc.handleRequest(tunnelMsg)
+        select {
+        case <-tc.ctx.Done():
+            tc.logger.Printf("Message handler context cancelled")
+            return
         default:
-            tc.logger.Printf("Unknown message type: %s", tunnelMsg.Type)
+            // Remove any read deadline for ongoing message handling
+            tc.conn.SetReadDeadline(time.Now().Add(60 * time.Second)) // 60 second read timeout
+            
+            msgType, message, err := tc.conn.ReadMessage()
+            if err != nil {
+                if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+                    tc.logger.Printf("WebSocket error: %v", err)
+                }
+                return
+            }
+
+            tc.logger.Printf("Received WebSocket message - Type: %d, Size: %d bytes", msgType, len(message))
+            
+            // Log message preview for debugging
+            if len(message) > 1000 {
+                tc.logger.Printf("Message preview - First 500 chars: %s", string(message[:500]))
+                tc.logger.Printf("Message preview - Last 500 chars: %s", string(message[len(message)-500:]))
+            }
+
+            var tunnelMsg TunnelMessage
+            if err := json.Unmarshal(message, &tunnelMsg); err != nil {
+                tc.logger.Printf("Failed to unmarshal message of size %d bytes: %v", len(message), err)
+                
+                // Check if message appears truncated
+                messageStr := string(message)
+                if !strings.HasSuffix(strings.TrimSpace(messageStr), "}") {
+                    tc.logger.Printf("Message appears truncated - doesn't end with '}'")
+                }
+                
+                continue
+            }
+
+            tc.logger.Printf("Received message type: %s", tunnelMsg.Type)
+
+            switch tunnelMsg.Type {
+            case "request":
+                go tc.handleRequest(tunnelMsg)
+            default:
+                tc.logger.Printf("Unknown message type: %s", tunnelMsg.Type)
+            }
         }
     }
 }
@@ -179,16 +278,20 @@ func (tc *TunnelClient) handleRequest(msg TunnelMessage) {
             RequestID:  msg.RequestID,
             StatusCode: 500,
             Headers:    map[string]string{"Content-Type": "text/plain"},
-            Body:       []byte("Internal server error"),
+            Body:       base64.StdEncoding.EncodeToString([]byte("Internal server error")),
         }
     } else {
         response.Type = "response"
         response.RequestID = msg.RequestID
     }
 
-    // Send response back to server
+    // Log response size before sending
+    responseData, _ := json.Marshal(*response)
+    tc.logger.Printf("Queuing response of size: %d bytes", len(responseData))
+
+    // Send response back to server through write queue
     if err := tc.sendMessage(*response); err != nil {
-        tc.logger.Printf("Failed to send response: %v", err)
+        tc.logger.Printf("Failed to queue response: %v", err)
     }
 }
 
@@ -196,8 +299,20 @@ func (tc *TunnelClient) forwardToLocal(msg TunnelMessage) (*TunnelMessage, error
     // Construct local URL
     localURL := fmt.Sprintf("http://localhost:%d%s", tc.config.LocalPort, msg.Path)
     
+    // Decode body from base64 if present
+    var bodyBytes []byte
+    if msg.Body != "" {
+        decoded, err := base64.StdEncoding.DecodeString(msg.Body)
+        if err != nil {
+            tc.logger.Printf("Failed to decode base64 body: %v", err)
+            bodyBytes = []byte(msg.Body) // Fallback to treating as plain text
+        } else {
+            bodyBytes = decoded
+        }
+    }
+    
     // Create request
-    req, err := http.NewRequest(msg.Method, localURL, bytes.NewReader(msg.Body))
+    req, err := http.NewRequest(msg.Method, localURL, bytes.NewReader(bodyBytes))
     if err != nil {
         return nil, err
     }
@@ -231,22 +346,30 @@ func (tc *TunnelClient) forwardToLocal(msg TunnelMessage) (*TunnelMessage, error
         }
     }
 
-    tc.logger.Printf("Local response: %d %s", resp.StatusCode, http.StatusText(resp.StatusCode))
+    tc.logger.Printf("Local response: %d %s, Body size: %d bytes", 
+                     resp.StatusCode, http.StatusText(resp.StatusCode), len(body))
+
+    // Encode body as base64
+    encodedBody := base64.StdEncoding.EncodeToString(body)
+    tc.logger.Printf("Encoded body size: %d bytes", len(encodedBody))
 
     return &TunnelMessage{
         StatusCode: resp.StatusCode,
         Headers:    headers,
-        Body:       body,
+        Body:       encodedBody, // Now base64 encoded
     }, nil
 }
 
 func (tc *TunnelClient) sendMessage(msg TunnelMessage) error {
-    data, err := json.Marshal(msg)
-    if err != nil {
-        return err
+    select {
+    case tc.writeQueue <- msg:
+        tc.logger.Printf("Message queued for sending, type: %s", msg.Type)
+        return nil
+    case <-time.After(5 * time.Second):
+        return fmt.Errorf("timeout queuing message for write")
+    case <-tc.ctx.Done():
+        return fmt.Errorf("client context cancelled")
     }
-
-    return tc.conn.WriteMessage(websocket.TextMessage, data)
 }
 
 func (tc *TunnelClient) waitForInterrupt() {
@@ -256,7 +379,20 @@ func (tc *TunnelClient) waitForInterrupt() {
     <-interrupt
     fmt.Printf("\n\n🛑 Shutting down tunnel...\n")
 
-    // Close connection gracefully
-    tc.conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
+    // Cancel context to stop workers
+    tc.cancel()
+
+    // Send close message through the write queue
+    closeMsg := TunnelMessage{Type: "close"}
+    select {
+    case tc.writeQueue <- closeMsg:
+    case <-time.After(1 * time.Second):
+        tc.logger.Printf("Timeout sending close message")
+    }
+    
+    // Wait a bit for cleanup
     time.Sleep(time.Second)
+    
+    // Close WebSocket connection
+    tc.conn.Close()
 }

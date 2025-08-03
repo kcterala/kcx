@@ -11,7 +11,7 @@ type AppConfig struct {
 	AuthToken string `json:"authToken"`
 }
 
-const configFileName = ".kcx-config.json"
+const configFileName = ".config/kcx-config.json"
 
 // getConfigPath returns the path to the config file in the user's home directory
 func getConfigPath() (string, error) {
