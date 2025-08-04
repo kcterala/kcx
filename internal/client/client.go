@@ -296,8 +296,18 @@ func (tc *TunnelClient) handleRequest(msg TunnelMessage) {
 }
 
 func (tc *TunnelClient) forwardToLocal(msg TunnelMessage) (*TunnelMessage, error) {
-    // Construct local URL
+    // Construct local URL - always use localhost
+    var hostHeader string
+    
     localURL := fmt.Sprintf("http://localhost:%d%s", tc.config.LocalPort, msg.Path)
+    
+    if tc.config.UseSubdomainLocalhost && tc.config.Subdomain != "" {
+        hostHeader = fmt.Sprintf("%s.localhost:%d", tc.config.Subdomain, tc.config.LocalPort)
+        tc.logger.Printf("Using localhost URL: %s with subdomain Host header: %s", localURL, hostHeader)
+    } else {
+        hostHeader = fmt.Sprintf("localhost:%d", tc.config.LocalPort)
+        tc.logger.Printf("Using localhost URL: %s with standard Host header: %s", localURL, hostHeader)
+    }
     
     // Decode body from base64 if present
     var bodyBytes []byte
@@ -319,11 +329,14 @@ func (tc *TunnelClient) forwardToLocal(msg TunnelMessage) (*TunnelMessage, error
 
     // Copy headers
     for key, value := range msg.Headers {
-        // Skip host header as it should be localhost
+        // Skip host header as we'll set it explicitly below
         if strings.ToLower(key) != "host" {
             req.Header.Set(key, value)
         }
     }
+    
+    // Set the Host header appropriately
+    req.Host = hostHeader
 
     // Make request
     resp, err := tc.httpClient.Do(req)
@@ -342,7 +355,7 @@ func (tc *TunnelClient) forwardToLocal(msg TunnelMessage) (*TunnelMessage, error
     headers := make(map[string]string)
     for key, values := range resp.Header {
         if len(values) > 0 {
-            headers[key] = values[0]
+            headers[key] = strings.Join(values, ", ")
         }
     }
 

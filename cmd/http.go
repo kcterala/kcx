@@ -14,11 +14,12 @@ import (
 )
 
 var (
-    serverURL    string
-    localPort    int
-    subdomain    string
-    authToken    string
-    verbose      bool
+    serverURL              string
+    localPort              int
+    subdomain              string
+    authToken              string
+    verbose                bool
+    useSubdomainLocalhost  bool
 )
 
 // httpCmd represents the http command
@@ -37,6 +38,11 @@ var httpCmd = &cobra.Command{
             os.Exit(1)
         }
         localPort = port
+
+		if localPort < 1 || localPort > 65535 {
+			cmd.PrintErrf("Error: port must be between 1 and 65535\n")
+			os.Exit(1)
+		}
     
 		// No token provided via command line, get from config or prompt
 		token, err := config.GetOrPromptAuthToken()
@@ -46,22 +52,27 @@ var httpCmd = &cobra.Command{
 		}
 
         clientConfig := &client.Config{
-            ServerURL:   serverURL,
-            LocalPort:   localPort,
-            Subdomain:   subdomain,
-            AuthToken:   token,
-            Verbose:     verbose,
+            ServerURL:              serverURL,
+            LocalPort:              localPort,
+            Subdomain:              subdomain,
+            AuthToken:              token,
+            Verbose:                verbose,
+            UseSubdomainLocalhost:  useSubdomainLocalhost,
         }
         
         tunnelClient := client.NewTunnelClient(clientConfig)
-        tunnelClient.Start()
+	    if err := tunnelClient.Start(); err != nil {
+	        cmd.PrintErrf("Error: %v\n", err)
+	        os.Exit(1)
+	    }
     },
 }
 
 func init() {
 	rootCmd.AddCommand(httpCmd)
 
-	httpCmd.Flags().StringVarP(&serverURL, "server", "s", "ws://localhost:8080/tunnel", "Tunnel server WebSocket URL")
+	httpCmd.Flags().StringVarP(&serverURL, "server", "s", "wss://tunnel.kcterala.dev/tunnel", "Tunnel server WebSocket URL")
     httpCmd.Flags().StringVarP(&subdomain, "subdomain", "d", "", "Custom subdomain (optional)")
     httpCmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "Verbose logging")
+    httpCmd.Flags().BoolVarP(&useSubdomainLocalhost, "use-subdomain-localhost", "l", false, "Forward to subdomain.localhost instead of localhost")
 }

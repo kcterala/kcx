@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"fmt"
 	"math/big"
+	"time"
 )
 
 func generateRandomSubdomain() string {
@@ -18,6 +19,10 @@ func generateRandomSubdomain() string {
 }
 
 func randomInt(max int) int {
-    n, _ := rand.Int(rand.Reader, big.NewInt(int64(max)))
+    n, err := rand.Int(rand.Reader, big.NewInt(int64(max)))
+    if err != nil {
+        // Fall back to timestamp-based randomness
+        return int(time.Now().UnixNano() % int64(max))
+    }
     return int(n.Int64())
 }
