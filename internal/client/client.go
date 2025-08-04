@@ -338,6 +338,9 @@ func (tc *TunnelClient) forwardToLocal(msg TunnelMessage) (*TunnelMessage, error
     // Set the Host header appropriately
     req.Host = hostHeader
 
+    // Set X-Forwarded-Host header with the same value
+    req.Header.Set("X-Forwarded-Host", hostHeader)
+
     // Make request
     resp, err := tc.httpClient.Do(req)
     if err != nil {
