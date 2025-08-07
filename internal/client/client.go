@@ -335,7 +335,11 @@ func (tc *TunnelClient) makeRequestWithRetry(req *http.Request) (*http.Response,
             case <-time.After(delay):
                 // Reset body reader for next attempt
                 if bodyReader != nil {
-                    req.Body = io.NopCloser(bodyReader.(*bytes.Reader))
+                    if br, ok := bodyReader.(*bytes.Reader); ok {
+                        req.Body = io.NopCloser(br)
+                    } else {
+                        return nil, fmt.Errorf("unexpected bodyReader type: %T", bodyReader)
+                    }
                 }
                 continue
             case <-tc.ctx.Done():
