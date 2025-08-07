@@ -223,7 +223,7 @@ func (tc *TunnelClient) handleMessages() {
             return
         default:
             // Remove any read deadline for ongoing message handling
-            tc.conn.SetReadDeadline(time.Now().Add(60 * time.Second)) // 60 second read timeout
+            tc.conn.SetReadDeadline(time.Time{}) // No read timeout
             
             msgType, message, err := tc.conn.ReadMessage()
             if err != nil {
@@ -295,6 +295,62 @@ func (tc *TunnelClient) handleRequest(msg TunnelMessage) {
     }
 }
 
+func (tc *TunnelClient) makeRequestWithRetry(req *http.Request) (*http.Response, error) {
+    maxRetries := 5
+    baseDelay := 1 * time.Second
+    maxDelay := 30 * time.Second
+    
+    for attempt := 0; attempt <= maxRetries; attempt++ {
+        // Clone the request body since it might be consumed
+        var bodyReader io.Reader
+        if req.Body != nil {
+            bodyBytes, err := io.ReadAll(req.Body)
+            if err != nil {
+                return nil, fmt.Errorf("failed to read request body: %w", err)
+            }
+            bodyReader = bytes.NewReader(bodyBytes)
+            req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+        }
+        
+        resp, err := tc.httpClient.Do(req)
+        if err == nil {
+            if attempt > 0 {
+                tc.logger.Printf("Local server reconnected successfully after %d attempts", attempt)
+            }
+            return resp, nil
+        }
+        
+        if attempt == 0 {
+            tc.logger.Printf("Local server at localhost:%d appears to be down, polling for reconnection...", tc.config.LocalPort)
+        }
+        
+        if attempt < maxRetries {
+            delay := baseDelay * time.Duration(1 << uint(attempt))
+            if delay > maxDelay {
+                delay = maxDelay
+            }
+            tc.logger.Printf("Attempt %d failed, retrying in %v: %v", attempt+1, delay, err)
+            
+            select {
+            case <-time.After(delay):
+                // Reset body reader for next attempt
+                if bodyReader != nil {
+                    if br, ok := bodyReader.(*bytes.Reader); ok {
+                        req.Body = io.NopCloser(br)
+                    } else {
+                        return nil, fmt.Errorf("unexpected bodyReader type: %T", bodyReader)
+                    }
+                }
+                continue
+            case <-tc.ctx.Done():
+                return nil, fmt.Errorf("client context cancelled during retry")
+            }
+        }
+    }
+    
+    return nil, fmt.Errorf("local server at localhost:%d is not responding after %d attempts", tc.config.LocalPort, maxRetries+1)
+}
+
 func (tc *TunnelClient) forwardToLocal(msg TunnelMessage) (*TunnelMessage, error) {
     // Construct local URL - always use localhost
     var hostHeader string
@@ -341,8 +397,8 @@ func (tc *TunnelClient) forwardToLocal(msg TunnelMessage) (*TunnelMessage, error
     // Set X-Forwarded-Host header with the same value
     req.Header.Set("X-Forwarded-Host", hostHeader)
 
-    // Make request
-    resp, err := tc.httpClient.Do(req)
+    // Make request with retry logic
+    resp, err := tc.makeRequestWithRetry(req)
     if err != nil {
         return nil, err
     }
