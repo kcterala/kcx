@@ -45,7 +45,7 @@ var httpCmd = &cobra.Command{
 		}
     
 		// No token provided via command line, get from config or prompt
-		token, err := config.GetOrPromptAuthToken()
+		token, err := config.GetOrPromptTunnelAuthToken()
 		if err != nil {
 			fmt.Printf("Error getting auth token: %v\n", err)
 			os.Exit(1)
