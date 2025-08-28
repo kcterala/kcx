@@ -393,10 +393,7 @@ func (tc *TunnelClient) forwardToLocal(msg TunnelMessage) (*TunnelMessage, error
     
     // Set the Host header appropriately
     req.Host = hostHeader
-
-    // Set X-Forwarded-Host header with the same value
-    req.Header.Set("X-Forwarded-Host", hostHeader)
-
+    
     // Make request with retry logic
     resp, err := tc.makeRequestWithRetry(req)
     if err != nil {
