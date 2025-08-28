@@ -48,7 +48,7 @@ func LoadConfig() (*AppConfig, error) {
 }
 
 // SaveConfig saves the configuration to the config file
-func SaveConfig(config *AppConfig) error {
+func saveConfig(config *AppConfig) error {
 	configPath, err := getConfigPath()
 	if err != nil {
 		return err
@@ -67,7 +67,7 @@ func SaveConfig(config *AppConfig) error {
 }
 
 // GetAuthToken retrieves the auth token from config, returns empty string if not found
-func GetAuthToken() (string, error) {
+func getTunnelAuthToken() (string, error) {
 	config, err := LoadConfig()
 	if err != nil {
 		return "", err
@@ -76,12 +76,12 @@ func GetAuthToken() (string, error) {
 }
 
 // SetAuthToken saves the auth token to config
-func SetAuthToken(token string) error {
+func setAuthToken(token string) error {
 	config, err := LoadConfig()
 	if err != nil {
 		return err
 	}
 	
 	config.AuthToken = token
-	return SaveConfig(config)
+	return saveConfig(config)
 }
